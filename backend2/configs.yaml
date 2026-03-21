@@ -1,0 +1,191 @@
+# MS-ASL ASL Recognition Configuration
+# Research-grade configuration for Swin Transformer and CNN-LSTM models
+
+# =============================================================================
+# DATASET CONFIGURATION
+# =============================================================================
+
+dataset:
+  name: "msasl"
+  num_classes: 1000
+  frame_count: 16
+  img_size: 224
+  frame_skip: 1
+  
+  # Paths
+  msasl_root: "MS-ASL"
+  classes_file: "MSASL_classes.json"
+  train_json: "MSASL_train.json"
+  val_json: "MSASL_val.json"
+  test_json: "MSASL_test.json"
+
+# =============================================================================
+# MODEL CONFIGURATION
+# =============================================================================
+
+model:
+  # Swin Transformer
+  swin:
+    name: "swin_base_patch4_window7_224"
+    pretrained: true
+    temporal_pooling: "mean"
+    temporal_transformer: false
+    dropout: 0.1
+    freeze_backbone: false
+  
+  # CNN-LSTM Baseline
+  cnn_lstm:
+    hidden_size: 512
+    num_layers: 2
+    dropout: 0.5
+    freeze_backbone: false
+
+# =============================================================================
+# TRAINING CONFIGURATION
+# =============================================================================
+
+training:
+  # Hyperparameters
+  batch_size: 8
+  epochs: 50
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  warmup_epochs: 5
+  
+  # Optimizer
+  optimizer: "adamw"
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  
+  # Learning Rate Scheduler
+  lr_scheduler: "cosine"
+  min_lr: 1.0e-6
+  
+  # Mixed Precision
+  use_amp: true
+  grad_clip: 1.0
+  
+  # Regularization
+  dropout: 0.1
+  
+  # Data Loading
+  num_workers: 4
+  pin_memory: true
+  
+  # Checkpointing
+  save_checkpoints: true
+  checkpoint_frequency: 5
+  save_best_model: true
+  best_metric: "val_accuracy"
+  
+  # Early Stopping
+  early_stopping: true
+  early_stopping_patience: 10
+  early_stopping_metric: "val_loss"
+  
+  # Logging
+  use_tensorboard: true
+  log_frequency: 10
+
+# =============================================================================
+# EVALUATION CONFIGURATION
+# =============================================================================
+
+evaluation:
+  # Metrics
+  metrics: ["accuracy", "precision", "recall", "f1", "top5_accuracy"]
+  top_k: 5
+  
+  # Confusion Matrix
+  save_confusion_matrix: true
+  normalize_confusion_matrix: "true"
+  
+  # Per-class Analysis
+  save_per_class_metrics: true
+  
+  # Batch size for evaluation
+  eval_batch_size: 4
+
+# =============================================================================
+# REPRODUCIBILITY
+# =============================================================================
+
+reproducibility:
+  seed: 42
+  deterministic: true
+  benchmark: false
+
+# =============================================================================
+# HARDWARE CONFIGURATION
+# =============================================================================
+
+hardware:
+  # GPU
+  cuda_visible_devices: null  # null = use all available
+  num_workers: 4
+  pin_memory: true
+  
+  # Memory optimization
+  gradient_accumulation_steps: 1
+  empty_cache_frequency: 10
+
+# =============================================================================
+# LOGGING AND OUTPUT
+# =============================================================================
+
+logging:
+  level: "INFO"
+  save_logs: true
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  # Output directories
+  models_dir: "models"
+  logs_dir: "logs"
+  results_dir: "results"
+  cache_dir: "cache"
+  
+  # Experiment tracking
+  experiment_name_template: "{model_type}_{timestamp}"
+  timestamp_format: "%Y%m%d_%H%M%S"
+
+# =============================================================================
+# RESEARCH PAPER CONFIGURATION
+# =============================================================================
+
+paper:
+  title: "Vision Transformer-based American Sign Language Recognition using MS-ASL"
+  authors: ["ASL Recognition Research Team"]
+  affiliation: "Computer Vision Lab"
+  
+  # Baselines for comparison
+  baselines:
+    - name: "CNN-LSTM"
+      description: "CNN + LSTM for temporal modeling"
+    - name: "Swin-Base"
+      description: "Swin Transformer (proposed method)"
+  
+  # Expected performance ranges
+  expected_performance:
+    swin_transformer:
+      top1_accuracy: [0.4, 0.6]
+      top5_accuracy: [0.65, 0.8]
+      macro_f1: [0.35, 0.55]
+    
+    cnn_lstm_baseline:
+      top1_accuracy: [0.2, 0.4]
+      top5_accuracy: [0.45, 0.65]
+      macro_f1: [0.15, 0.35]
+
+# =============================================================================
+# DEVELOPMENT SETTINGS
+# =============================================================================
+
+development:
+  debug: false
+  test_run: false
+  profile: false
+  
+  # Test settings (when test_run: true)
+  test_epochs: 25
+  test_batch_size: 2
+  test_subset: 100  # Use only N samples per split for testing

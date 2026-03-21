@@ -1,0 +1,6 @@
+torch
+timm
+opencv-python
+flask
+flask-cors
+matplotlib
