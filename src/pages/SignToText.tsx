@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -8,10 +8,15 @@ import Webcam from "react-webcam";
 import { PredictionPanel } from "@/components/signease/PredictionPanel";
 
 const SEND_INTERVAL_MS = 500;
-const BACKEND_URL = "http://localhost:8001/predict";
-const CONFIDENCE_THRESHOLD_PERCENT = 30;
-const BUFFER_SIZE = 5;
-const MAJORITY_COUNT = 2;
+const BACKEND_URL = "http://127.0.0.1:8001/predict";
+const VOTE_MIN = 2;
+/** Only replace latched UI when server confidence (0–1) is strictly above this */
+const LATCH_CONF_THRESHOLD = 0.15;
+
+function hasServerPrediction(pred: unknown): boolean {
+  if (pred === null || pred === undefined) return false;
+  return String(pred).trim() !== "";
+}
 
 const SignToText = () => {
   const navigate = useNavigate();
@@ -19,19 +24,47 @@ const SignToText = () => {
   const [isCommunicating, setIsCommunicating] = useState(false);
   const [detectedText, setDetectedText] = useState<string>("");
   const [confidence, setConfidence] = useState<number>(0);
+  const [liveBarPercent, setLiveBarPercent] = useState<number>(0);
   const [statusText, setStatusText] = useState<string>("");
   const [isStabilizing, setIsStabilizing] = useState(false);
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [rawConfidence, setRawConfidence] = useState<number | null>(null);
   const [rawPrediction, setRawPrediction] = useState<string>("");
   const intervalRef = useRef<number | null>(null);
-  const predBufferRef = useRef<Array<{ text: string; conf: number }>>([]);
+  const resetSessionPendingRef = useRef(false);
+  /** True while the predict interval is running (avoids stale isCommunicating in async callbacks). */
+  const isStreamingRef = useRef(false);
 
   const videoConstraints = {
     width: 1280,
     height: 720,
     facingMode: "user" as const,
   };
+
+  useEffect(() => {
+    if (!isCommunicating) {
+      setLiveBarPercent(confidence);
+    }
+  }, [isCommunicating, confidence]);
+
+  const resetSessionAndBackend = useCallback(async () => {
+    setDetectedText("");
+    setConfidence(0);
+    setLiveBarPercent(0);
+    setRawPrediction("");
+    setRawConfidence(null);
+    setStatusText("");
+    setIsStabilizing(false);
+    try {
+      await fetch(BACKEND_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reset_ui_only: true }),
+      });
+    } catch {
+      /* offline demo */
+    }
+  }, []);
 
   const sendFrameOnce = async () => {
     const screenshot = webcamRef.current?.getScreenshot();
@@ -40,11 +73,16 @@ const SignToText = () => {
     try {
       if (!statusText && !detectedText) setStatusText("Connecting to AI...");
 
-      console.log("Sending frame to backend...");
+      const body: Record<string, unknown> = { image: screenshot };
+      if (resetSessionPendingRef.current) {
+        body.reset_session = true;
+        resetSessionPendingRef.current = false;
+      }
+
       const resp = await fetch(BACKEND_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: screenshot }),
+        body: JSON.stringify(body),
       });
 
       if (!resp.ok) {
@@ -52,56 +90,37 @@ const SignToText = () => {
       }
 
       const data = await resp.json();
-      console.log("Response received:", data);
-      console.log("RAW BACKEND RESPONSE:", data);
-      const text = String(data.text ?? "").trim();
-      const confPercent = Math.round(Number(data.confidence ?? 0) * 100);
-      setRawConfidence(Number.isFinite(confPercent) ? confPercent : null);
-      setRawPrediction(text);
+      const serverPred = data.prediction;
+      const hasPred = hasServerPrediction(serverPred);
+      const raw = String(data.raw_prediction ?? "").trim();
 
-      if (!text) {
-        // Fallback so examiner can see state updates even if backend returns empty text.
-        if (confPercent > 0) setRawPrediction("Unknown");
-        setStatusText("Analyzing...");
-        setIsStabilizing(true);
-        return;
+      const inference01 = Number(data.inference_confidence ?? data.confidence ?? 0);
+      const livePct = Math.min(100, Math.max(0, Math.round(inference01 * 100)));
+      if (isStreamingRef.current) {
+        setLiveBarPercent(livePct);
       }
 
-      if (confPercent < CONFIDENCE_THRESHOLD_PERCENT) {
-        setStatusText("Keep hand steady");
-        setIsStabilizing(true);
-        return;
+      const serverConf = Number(data.confidence ?? 0);
+      const confPercentFromServer = Math.round(serverConf * 100);
+      const voteSupport = Number(data.vote_support ?? 0);
+      const margin = Number(data.margin ?? 0);
+
+      setRawConfidence(Number.isFinite(livePct) ? livePct : null);
+      setRawPrediction(raw);
+
+      if (hasPred && serverConf > LATCH_CONF_THRESHOLD) {
+        setDetectedText(String(serverPred).trim());
+        setConfidence(Number.isFinite(confPercentFromServer) ? confPercentFromServer : 0);
       }
 
-      // Add to rolling buffer (last 5)
-      const buf = predBufferRef.current;
-      buf.push({ text, conf: confPercent });
-      while (buf.length > BUFFER_SIZE) buf.shift();
-
-      // Majority vote
-      const counts = new Map<string, number>();
-      for (const p of buf) counts.set(p.text, (counts.get(p.text) ?? 0) + 1);
-      let bestText = "";
-      let bestCount = 0;
-      for (const [t, c] of counts.entries()) {
-        if (c > bestCount) {
-          bestText = t;
-          bestCount = c;
+      if (isStreamingRef.current) {
+        if (hasPred) {
+          setStatusText("");
+          setIsStabilizing(voteSupport < VOTE_MIN || margin < 0.08);
+        } else {
+          setStatusText("Analyzing...");
+          setIsStabilizing(true);
         }
-      }
-
-      if (bestCount >= MAJORITY_COUNT) {
-        const matching = buf.filter((p) => p.text === bestText);
-        const avgConf =
-          matching.reduce((sum, p) => sum + p.conf, 0) / Math.max(1, matching.length);
-
-        setDetectedText(bestText);
-        setConfidence(Math.round(avgConf));
-        setStatusText("");
-        setIsStabilizing(false);
-      } else {
-        setStatusText("Analyzing...");
-        setIsStabilizing(true);
       }
     } catch (e) {
       console.error("Backend connection/predict failed:", e);
@@ -111,17 +130,15 @@ const SignToText = () => {
   };
 
   const startCommunicating = () => {
-    if (intervalRef.current !== null) return; // avoid duplicate intervals
+    if (intervalRef.current !== null) return;
+    isStreamingRef.current = true;
     setIsCommunicating(true);
     setStatusText("Connecting to AI...");
-    setDetectedText("");
-    setConfidence(0);
-    setIsStabilizing(false);
+    setIsStabilizing(true);
     setRawConfidence(null);
     setRawPrediction("");
-    predBufferRef.current = [];
+    resetSessionPendingRef.current = true;
 
-    // send immediately, then every 500ms
     void sendFrameOnce();
     intervalRef.current = window.setInterval(() => {
       void sendFrameOnce();
@@ -129,6 +146,7 @@ const SignToText = () => {
   };
 
   const stopCommunicating = () => {
+    isStreamingRef.current = false;
     setIsCommunicating(false);
     if (intervalRef.current !== null) {
       window.clearInterval(intervalRef.current);
@@ -136,11 +154,11 @@ const SignToText = () => {
     }
     setStatusText("");
     setIsStabilizing(false);
-    predBufferRef.current = [];
   };
 
   useEffect(() => {
     return () => {
+      isStreamingRef.current = false;
       if (intervalRef.current !== null) {
         window.clearInterval(intervalRef.current);
         intervalRef.current = null;
@@ -210,25 +228,20 @@ const SignToText = () => {
                 </div>
               )}
 
-              {/* Hand placement guide overlay - dotted square */}
               <div className="absolute inset-0 pointer-events-none">
-                {/* Dotted border square in center */}
                 <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-72 h-72 border-2 border-dashed border-white/60 rounded-lg">
-                  {/* Corner markers for better visibility */}
                   <div className="absolute -top-1 -left-1 w-3 h-3 bg-white/80 rounded-full"></div>
                   <div className="absolute -top-1 -right-1 w-3 h-3 bg-white/80 rounded-full"></div>
                   <div className="absolute -bottom-1 -left-1 w-3 h-3 bg-white/80 rounded-full"></div>
                   <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-white/80 rounded-full"></div>
                 </div>
 
-                {/* Hand icon guide */}
                 <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 flex items-center justify-center">
                   <div className="text-white/40 text-6xl opacity-30">
                     ✋
                   </div>
                 </div>
 
-                {/* Instruction text */}
                 <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 text-center">
                   <p className="text-white/70 text-sm bg-black/50 px-3 py-1 rounded-full">
                     Position hand in center square for best recognition
@@ -263,17 +276,15 @@ const SignToText = () => {
             statusText={statusText}
             prediction={detectedText}
             confidencePercent={confidence}
+            barPercent={liveBarPercent}
             stabilizing={isStabilizing}
             debugConfidencePercent={
-              statusText === "Keep hand steady" || statusText === "Analyzing..."
-                ? rawConfidence
-                : null
+              isCommunicating && isStabilizing ? rawConfidence : null
             }
             debugRawPrediction={
-              statusText === "Keep hand steady" || statusText === "Analyzing..."
-                ? (rawPrediction || (rawConfidence && rawConfidence > 0 ? "Unknown" : ""))
-                : null
+              isCommunicating && isStabilizing ? rawPrediction : null
             }
+            onResetSession={resetSessionAndBackend}
           />
           </div>
         </div>

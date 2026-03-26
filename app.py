@@ -56,6 +56,7 @@ def _resize_shortest_edge(frame_rgb: np.ndarray, shortest_edge: int) -> np.ndarr
 
 
 def _sample_exactly_16_frames(video_path: Path) -> List[np.ndarray]:
+    """Uniformly sample 16 RGB frames to match VideoMAE fine-tuning (same clip length as the API)."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
