@@ -2,12 +2,18 @@ import { useState, useEffect, useCallback } from "react";
 import { motion } from "framer-motion";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Search, RotateCcw, BadgeCheck } from "lucide-react";
+import { Search, RotateCcw, BadgeCheck, Copy, Languages } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 
 /** Default matches backend2 Flask (PORT=8001). Override with Vite: VITE_SIGNEASE_API_BASE */
 export const SIGNease_API_BASE =
   (import.meta.env.VITE_SIGNEASE_API_BASE as string | undefined)?.replace(/\/$/, "") ??
   "http://127.0.0.1:8001";
+
+const API_BASE_CANDIDATES: readonly string[] = Array.from(
+  new Set([SIGNease_API_BASE, "http://127.0.0.1:8001", "http://127.0.0.1:5000"]),
+);
 
 /** Display labels for the 10-word assistive vocabulary (folders use compact names, e.g. thankyou). */
 export const SUPPORTED_VOCABULARY: readonly string[] = [
@@ -38,6 +44,27 @@ type PredictionPanelProps = {
   onResetSession?: () => void;
 };
 
+/** Word shown in the large Current Sign label — matches on-screen display logic. */
+export function getVisibleSignWord({
+  statusText,
+  prediction,
+  debugRawPrediction,
+  isCommunicating,
+  stabilizing,
+}: Pick<
+  PredictionPanelProps,
+  "statusText" | "prediction" | "debugRawPrediction" | "isCommunicating" | "stabilizing"
+>): string {
+  const showConfidence = !statusText && !!prediction;
+  if (showConfidence) {
+    return String(prediction).trim();
+  }
+  if (isCommunicating && stabilizing && debugRawPrediction) {
+    return String(debugRawPrediction).trim();
+  }
+  return "";
+}
+
 export const PredictionPanel = ({
   isCommunicating,
   statusText,
@@ -49,6 +76,7 @@ export const PredictionPanel = ({
   debugRawPrediction = null,
   onResetSession,
 }: PredictionPanelProps) => {
+  const navigate = useNavigate();
   const ACTIVATION_THRESHOLD = 55;
   const displayText =
     statusText ||
@@ -58,6 +86,14 @@ export const PredictionPanel = ({
       : 'Click "Start Communicating" to begin.');
 
   const showConfidence = !statusText && !!prediction;
+  const visibleWord = getVisibleSignWord({
+    statusText,
+    prediction,
+    debugRawPrediction,
+    isCommunicating,
+    stabilizing,
+  });
+  const hasVisibleWord = visibleWord.length > 0;
   const [confirmedLocked, setConfirmedLocked] = useState(false);
   const isConfirmed = !!prediction && (confirmedLocked || confidencePercent >= ACTIVATION_THRESHOLD);
   const barW = Math.max(0, Math.min(100, barPercent ?? confidencePercent));
@@ -65,6 +101,24 @@ export const PredictionPanel = ({
   const handleReset = useCallback(() => {
     onResetSession?.();
   }, [onResetSession]);
+
+  const handleCopy = useCallback(async () => {
+    if (!hasVisibleWord) return;
+    const text = visibleWord.toUpperCase();
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Copied to clipboard");
+    } catch {
+      toast.error("Could not copy to clipboard");
+    }
+  }, [hasVisibleWord, visibleWord]);
+
+  const handleTranslate = useCallback(() => {
+    if (!hasVisibleWord) return;
+    navigate("/translator", {
+      state: { text: visibleWord.toUpperCase() },
+    });
+  }, [hasVisibleWord, visibleWord, navigate]);
 
   useEffect(() => {
     if (!onResetSession) return;
@@ -169,6 +223,31 @@ export const PredictionPanel = ({
           )}
         </div>
 
+        {hasVisibleWord && (
+          <div className="flex flex-wrap justify-center gap-3">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void handleCopy()}
+              className="border-white/20 text-gray-200 hover:bg-white/10"
+            >
+              <Copy className="w-4 h-4 mr-2" />
+              Copy
+            </Button>
+            <Button
+              type="button"
+              variant="hero"
+              size="sm"
+              onClick={handleTranslate}
+              className="min-w-[120px]"
+            >
+              <Languages className="w-4 h-4 mr-2" />
+              Translate
+            </Button>
+          </div>
+        )}
+
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-gray-300">Live signal (×100 from model)</span>
@@ -212,16 +291,22 @@ export const TextToSignDictionary = ({ className = "" }: TextToSignDictionaryPro
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [resolvedBase, setResolvedBase] = useState<string | null>(null);
+  const [candidateBases, setCandidateBases] = useState<string[]>([]);
+  const [candidateIndex, setCandidateIndex] = useState(0);
+  const [activeQuery, setActiveQuery] = useState("");
 
   const loadVideoForQuery = (q: string) => {
     const trimmed = q.trim();
     if (!trimmed) return;
     setLoadError(null);
     setIsLoading(true);
-    setVideoUrl(null);
-    window.setTimeout(() => {
-      setVideoUrl(`${SIGNease_API_BASE}/get_sign_video/${encodeURIComponent(trimmed)}`);
-    }, 0);
+    setResolvedBase(null);
+    setActiveQuery(trimmed);
+    setCandidateBases([...API_BASE_CANDIDATES]);
+    setCandidateIndex(0);
+    const firstBase = API_BASE_CANDIDATES[0];
+    setVideoUrl(`${firstBase}/get_sign_video/${encodeURIComponent(trimmed)}`);
   };
 
   const applySearch = () => loadVideoForQuery(searchTerm);
@@ -258,7 +343,7 @@ export const TextToSignDictionary = ({ className = "" }: TextToSignDictionaryPro
                 type="button"
                 onClick={() => {
                   setSearchTerm(w);
-                  loadVideoForQuery(w);
+                  void loadVideoForQuery(w);
                 }}
                 className="text-xs text-gray-200 bg-white/10 hover:bg-white/15 border border-white/10 px-2 py-1 rounded transition-colors"
               >
@@ -279,18 +364,34 @@ export const TextToSignDictionary = ({ className = "" }: TextToSignDictionaryPro
               muted
               loop
               playsInline
-              onLoadedData={() => setIsLoading(false)}
-              onError={() => {
+              onLoadedData={() => {
                 setIsLoading(false);
-                setLoadError("Could not load video. Is the backend running on port 8001?");
+                const base = candidateBases[candidateIndex] ?? null;
+                setResolvedBase(base);
+                setLoadError(null);
+              }}
+              onError={() => {
+                const nextIdx = candidateIndex + 1;
+                if (nextIdx < candidateBases.length) {
+                  setCandidateIndex(nextIdx);
+                  const nextBase = candidateBases[nextIdx];
+                  setVideoUrl(`${nextBase}/get_sign_video/${encodeURIComponent(activeQuery)}`);
+                  return;
+                }
+                setIsLoading(false);
+                setLoadError("Could not load a reference clip. Start backend2 API and try again.");
               }}
             />
+            {resolvedBase && (
+              <p className="text-center text-xs text-gray-400 py-1">Source: {resolvedBase}</p>
+            )}
             {isLoading && (
               <p className="text-center text-sm text-gray-400 py-2">Loading…</p>
             )}
             {loadError && <p className="text-center text-sm text-red-300 py-2">{loadError}</p>}
           </div>
         )}
+        {!videoUrl && loadError && <p className="text-center text-sm text-red-300 py-2">{loadError}</p>}
       </div>
     </Card>
   );

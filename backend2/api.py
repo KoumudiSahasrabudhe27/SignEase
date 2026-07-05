@@ -114,6 +114,34 @@ def _apply_imagenet_processor_norm(processor: VideoMAEImageProcessor) -> None:
     processor.image_std = list(IMAGENET_STD)
 
 
+def _load_processor_with_fallback(model_dir: Path) -> VideoMAEImageProcessor:
+    """
+    Load processor from exported files; fallback when preprocessor_config.json
+    is missing from local fine-tuned checkpoints.
+    """
+    try:
+        return VideoMAEImageProcessor.from_pretrained(str(model_dir))
+    except OSError as exc:
+        pre_cfg = model_dir / "preprocessor_config.json"
+        if pre_cfg.exists():
+            raise
+        print(
+            f"[SignEase] preprocessor_config.json not found in {model_dir}. "
+            "Using VideoMAEImageProcessor fallback defaults (224 ImageNet normalization)."
+        )
+        return VideoMAEImageProcessor(
+            do_resize=True,
+            size={"shortest_edge": 224},
+            do_center_crop=True,
+            crop_size={"height": 224, "width": 224},
+            do_rescale=True,
+            rescale_factor=1 / 255.0,
+            do_normalize=True,
+            image_mean=list(IMAGENET_MEAN),
+            image_std=list(IMAGENET_STD),
+        )
+
+
 def _uniform_sample_to_16(frames_rgb: List[np.ndarray]) -> List[np.ndarray]:
     """Exactly 16 equidistant frames from the buffer (newest bias when buffer is full)."""
     if len(frames_rgb) == 0:
@@ -203,31 +231,39 @@ def _first_video_for_word(dataset_root: Path, word: str) -> Optional[Path]:
 
 
 def _resolve_dataset_root(base_dir: Path) -> Path:
-    """Prefer ./SignEase_Project/SignEase_dataset next to backend2."""
-    primary = (base_dir / "SignEase_Project" / "SignEase_dataset").resolve()
-    if primary.exists():
-        return primary
-    for p in (base_dir.parent / "SignEase_dataset", base_dir / "SignEase_dataset"):
+    """Resolve local dataset root across common SignEase layouts."""
+    candidates = [
+        (base_dir / "SignEase_final_final" / "SignEase_dataset").resolve(),
+        (base_dir.parent / "SignEase_final_final" / "SignEase_dataset").resolve(),
+        (base_dir / "SignEase_Project" / "SignEase_dataset").resolve(),
+        (base_dir.parent / "SignEase_dataset").resolve(),
+        (base_dir / "SignEase_dataset").resolve(),
+    ]
+    for p in candidates:
         if p.exists():
-            return p.resolve()
-    return primary
+            return p
+    return candidates[0]
 
 
 def _resolve_video_mae_dir(base_dir: Path) -> Path:
     """
-    Find ./SignEase_Final_Model (Hugging Face export with config + weights).
+    Find a Hugging Face VideoMAE export folder (config + weights).
 
     Search order:
     1) SIGNEASE_VIDEOMAE_DIR environment variable
-    2) <project_root>/SignEase_Final_Model  (parent of backend2/)
-    3) backend2/SignEase_Final_Model
-    4) backend2/SignEase_Project/SignEase_Final_Model  (common local layout)
-    5) current working directory ./SignEase_Final_Model
+    2) <project_root>/SignEase_final_final/SignEase_Final_Model
+    3) backend2/SignEase_final_final/SignEase_Final_Model
+    4) <project_root>/SignEase_Final_Model
+    5) backend2/SignEase_Final_Model
+    6) backend2/SignEase_Project/SignEase_Final_Model  (legacy local layout)
+    7) current working directory ./SignEase_Final_Model
     """
     candidates: List[Path] = []
     env = os.environ.get("SIGNEASE_VIDEOMAE_DIR", "").strip()
     if env:
         candidates.append(Path(env).expanduser().resolve())
+    candidates.append((base_dir.parent / "SignEase_final_final" / "SignEase_Final_Model").resolve())
+    candidates.append((base_dir / "SignEase_final_final" / "SignEase_Final_Model").resolve())
     candidates.append((base_dir.parent / "SignEase_Final_Model").resolve())
     candidates.append((base_dir / "SignEase_Final_Model").resolve())
     candidates.append((base_dir / "SignEase_Project" / "SignEase_Final_Model").resolve())
@@ -239,12 +275,14 @@ def _resolve_video_mae_dir(base_dir: Path) -> Path:
         if p not in seen:
             seen.add(p)
             unique.append(p)
-        if p.exists() and p.is_dir():
+        has_config = (p / "config.json").is_file()
+        has_weights = (p / "model.safetensors").is_file() or (p / "pytorch_model.bin").is_file()
+        if p.exists() and p.is_dir() and has_config and has_weights:
             return p
 
     tried = "\n  ".join(str(p) for p in unique)
     raise FileNotFoundError(
-        "VideoMAE model folder 'SignEase_Final_Model' not found.\n"
+        "VideoMAE model folder not found (expected config.json + model weights).\n"
         "Place your fine-tuned export at one of:\n"
         f"  {tried}\n"
         "Or set: export SIGNEASE_VIDEOMAE_DIR=/path/to/SignEase_Final_Model"
@@ -258,7 +296,7 @@ def create_app() -> Flask:
     dataset_root = _resolve_dataset_root(base_dir)
 
     device = _pick_device()
-    processor = VideoMAEImageProcessor.from_pretrained(str(model_dir))
+    processor = _load_processor_with_fallback(model_dir)
     _apply_imagenet_processor_norm(processor)
     model = VideoMAEForVideoClassification.from_pretrained(str(model_dir)).to(device)
     model.eval()

@@ -1,11 +1,13 @@
 # --- Large AI Assets (Crucial for GitHub limits) ---
 SignEase_Final_Model/
 SignEase_dataset/
+Baseline_Images/
 backend2/SignEase_Project/
 *.safetensors
 *.bin
 *.pth
 *.onnx
+*.zip
 
 # --- Video & Media Files ---
 *.mov
@@ -18,7 +20,11 @@ __pycache__/
 *.pyc
 venv/
 .env
+backend2/nltk_data/
 .ipynb_checkpoints/
+sample_data/
+drive/
+__MACOSX/
 
 # --- Node / Frontend ---
 node_modules/
@@ -42,3 +48,9 @@ yarn-error.log*
 # --- Logs ---
 logs/
 *.log
+
+# --- Important: Keep the research metrics ---
+!*.csv
+!*.json
+!*.png
+!*.ipynb
